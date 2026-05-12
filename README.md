@@ -2,7 +2,7 @@
 
 A blazing-fast, terminal-based CSV normalization tool. `normie-rs` helps you quickly clean up messy CSV data by mapping unique column values to normalized targets, with a focus on speed and keyboard-driven efficiency.
 
-![Splash Screen Placeholder](https://via.placeholder.com/800x400?text=normie-rs+Dashboard)
+![normie-rs Splash](./assets/splash.avif)
 
 ## Features
 
@@ -18,6 +18,10 @@ A blazing-fast, terminal-based CSV normalization tool. `normie-rs` helps you qui
 - **Blazing Fast**: Built in Rust with `ratatui` for a snappy, low-latency experience.
 
 ## Installation
+
+### Binary Releases
+
+You can download pre-compiled binaries for your platform from the [v0.1.0 Release](https://github.com/SirMarshall/normie-rs/releases/tag/v0.1.0).
 
 ### From Source
 
@@ -37,6 +41,9 @@ Simply run the executable:
 normie-rs
 ```
 
+### Global Shortcuts
+- `CTRL+C`: Force quit the application at any time.
+
 ### Keyboard Shortcuts
 
 #### Dashboard
@@ -54,12 +61,23 @@ normie-rs
 - `TAB`: Switch between **Columns** and **Unique Values** panes.
 - `UP/DOWN`: Navigate the active list.
 - `SPACE`: Multi-select values for batch mapping.
-- `ENTER`: Map selected/highlighted value(s) to a new string.
-- `/`: Search/Filter unique values.
-- `K`: Set the **Source Key** column (used for the context pane).
+- `ENTER`: Open **Normalization Modal** to map selected/highlighted value(s).
+- `/`: Open **Search Modal** to filter unique values.
+- `K`: Open **Key Selection Modal** to change the Source Key column.
 - `S`: Save normalized CSV.
 - `DELETE / BACKSPACE`: Remove a mapping.
 - `ESC`: Return to Dashboard.
+
+## Data & Configuration
+
+### CSV Requirements
+`normie-rs` requires a header row to correctly identify and map columns.
+
+### Configuration
+Your recent files and application state are stored locally:
+- **Linux**: `~/.config/normie-rs/config.json`
+- **macOS**: `~/Library/Application Support/com.GoldTone.normie-rs/config.json`
+- **Windows**: `%AppData%\GoldTone\normie-rs\config\config.json`
 
 ## Output
 
