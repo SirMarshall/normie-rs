@@ -844,6 +844,34 @@ impl NormalizerApp {
                                         crate::db::ConditionOperator::NotEquals => cond_val != &condition.value,
                                         crate::db::ConditionOperator::Contains => cond_val.contains(&condition.value),
                                         crate::db::ConditionOperator::NotContains => !cond_val.contains(&condition.value),
+                                        crate::db::ConditionOperator::GreaterThan => {
+                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                                v > f
+                                            } else {
+                                                cond_val > &condition.value
+                                            }
+                                        }
+                                        crate::db::ConditionOperator::LessThan => {
+                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                                v < f
+                                            } else {
+                                                cond_val < &condition.value
+                                            }
+                                        }
+                                        crate::db::ConditionOperator::GreaterOrEqual => {
+                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                                v >= f
+                                            } else {
+                                                cond_val >= &condition.value
+                                            }
+                                        }
+                                        crate::db::ConditionOperator::LessOrEqual => {
+                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                                v <= f
+                                            } else {
+                                                cond_val <= &condition.value
+                                            }
+                                        }
                                         crate::db::ConditionOperator::InList => {
                                             if let Some(vals) = &condition.values {
                                                 vals.contains(cond_val)

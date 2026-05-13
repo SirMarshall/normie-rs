@@ -378,6 +378,10 @@ fn ui_master_list(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
                         crate::db::ConditionOperator::NotEquals => "!=",
                         crate::db::ConditionOperator::Contains => "~",
                         crate::db::ConditionOperator::NotContains => "!~",
+                        crate::db::ConditionOperator::GreaterThan => ">",
+                        crate::db::ConditionOperator::LessThan => "<",
+                        crate::db::ConditionOperator::GreaterOrEqual => ">=",
+                        crate::db::ConditionOperator::LessOrEqual => "<=",
                         crate::db::ConditionOperator::InList => "IN",
                     };
                     format!(" [IF {} {} '{}']", c.col_name, op, c.value)
