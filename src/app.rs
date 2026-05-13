@@ -213,6 +213,7 @@ impl FileBrowserState {
 pub enum ActivePane {
     Columns,
     Values,
+    MasterList,
 }
 
 #[derive(PartialEq)]
@@ -221,6 +222,7 @@ pub enum InputMode {
     Editing,
     SelectingKey,
     Searching,
+    Filtering,
 }
 
 pub struct UiState {
@@ -232,9 +234,12 @@ pub struct UiState {
     pub col_list_state: ListState,
     pub val_list_state: ListState,
     pub key_list_state: ListState,
+    pub master_list_state: ListState,
     pub multi_selected: HashSet<(usize, String)>,
     pub registry_key_col: usize,
     pub info_results: Vec<String>,
+    pub active_filters: Vec<crate::db::Condition>,
+    pub current_filter_operator: crate::db::ConditionOperator,
 }
 
 pub struct NormalizerApp {
@@ -300,9 +305,12 @@ impl NormalizerApp {
                 col_list_state: col_state,
                 val_list_state: ListState::default(),
                 key_list_state: ListState::default(),
+                master_list_state: ListState::default(),
                 multi_selected: HashSet::new(),
                 registry_key_col: initial_key_idx,
                 info_results: Vec::new(),
+                active_filters: Vec::new(),
+                current_filter_operator: crate::db::ConditionOperator::Contains,
             },
             status_msg: "Ready (Mappings Loaded)".to_string(),
         };
@@ -319,17 +327,36 @@ impl NormalizerApp {
                 KeyCode::Char('s') => {
                     let _ = self.save_csv();
                 }
-                KeyCode::Tab => {
-                    self.ui.active_pane = if self.ui.active_pane == ActivePane::Columns {
-                        ActivePane::Values
-                    } else {
+                KeyCode::Char('m') => {
+                    self.ui.active_pane = if self.ui.active_pane == ActivePane::MasterList {
                         ActivePane::Columns
+                    } else {
+                        ActivePane::MasterList
+                    };
+                }
+                KeyCode::Tab => {
+                    self.ui.active_pane = match self.ui.active_pane {
+                        ActivePane::Columns => ActivePane::Values,
+                        ActivePane::Values => ActivePane::Columns,
+                        ActivePane::MasterList => ActivePane::Columns,
                     };
                 }
                 KeyCode::Down => self.move_list(1),
                 KeyCode::Up => self.move_list(-1),
                 KeyCode::Char(' ') => self.toggle_select(),
                 KeyCode::Char('k') => self.ui.input_mode = InputMode::SelectingKey,
+                KeyCode::Char('f') => {
+                    let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
+                    if let Some(pos) = self.ui.active_filters.iter().position(|f| f.col_idx == col_idx) {
+                        self.ui.active_filters.remove(pos);
+                        self.status_msg = "Filter cleared".to_string();
+                        self.update_filtered_vals();
+                    } else if !self.ui.multi_selected.is_empty() {
+                        self.apply_list_filter();
+                    } else {
+                        self.ui.input_mode = InputMode::Filtering;
+                    }
+                }
                 KeyCode::Char('/') => {
                     self.ui.input_mode = InputMode::Searching;
                 }
@@ -368,6 +395,46 @@ impl NormalizerApp {
                 }
                 _ => {}
             },
+            InputMode::Filtering => match key.code {
+                KeyCode::Tab => {
+                    self.ui.current_filter_operator = match self.ui.current_filter_operator {
+                        crate::db::ConditionOperator::Contains => crate::db::ConditionOperator::NotContains,
+                        crate::db::ConditionOperator::NotContains => crate::db::ConditionOperator::Equals,
+                        crate::db::ConditionOperator::Equals => crate::db::ConditionOperator::NotEquals,
+                        crate::db::ConditionOperator::NotEquals => crate::db::ConditionOperator::GreaterThan,
+                        crate::db::ConditionOperator::GreaterThan => crate::db::ConditionOperator::LessThan,
+                        crate::db::ConditionOperator::LessThan => crate::db::ConditionOperator::GreaterOrEqual,
+                        crate::db::ConditionOperator::GreaterOrEqual => crate::db::ConditionOperator::LessOrEqual,
+                        _ => crate::db::ConditionOperator::Contains,
+                    };
+                }
+                KeyCode::BackTab => {
+                    self.ui.current_filter_operator = match self.ui.current_filter_operator {
+                        crate::db::ConditionOperator::Contains => crate::db::ConditionOperator::LessOrEqual,
+                        crate::db::ConditionOperator::LessOrEqual => crate::db::ConditionOperator::GreaterOrEqual,
+                        crate::db::ConditionOperator::GreaterOrEqual => crate::db::ConditionOperator::LessThan,
+                        crate::db::ConditionOperator::LessThan => crate::db::ConditionOperator::GreaterThan,
+                        crate::db::ConditionOperator::GreaterThan => crate::db::ConditionOperator::NotEquals,
+                        crate::db::ConditionOperator::NotEquals => crate::db::ConditionOperator::Equals,
+                        crate::db::ConditionOperator::Equals => crate::db::ConditionOperator::NotContains,
+                        _ => crate::db::ConditionOperator::Contains,
+                    };
+                }
+                KeyCode::Enter => {
+                    self.set_active_filter();
+                    self.ui.input_mode = InputMode::Normal;
+                    self.ui.input_buffer.clear();
+                }
+                KeyCode::Char(c) => self.ui.input_buffer.push(c),
+                KeyCode::Backspace => {
+                    self.ui.input_buffer.pop();
+                }
+                KeyCode::Esc => {
+                    self.ui.input_mode = InputMode::Normal;
+                    self.ui.input_buffer.clear();
+                }
+                _ => {}
+            },
             InputMode::SelectingKey => match key.code {
                 KeyCode::Up => {
                     let i = self.ui.key_list_state.selected().unwrap_or(0);
@@ -401,6 +468,67 @@ impl NormalizerApp {
         Action::None
     }
 
+    pub fn set_active_filter(&mut self) {
+        let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
+        let col_name = self.db.headers[col_idx].clone();
+        let val = self.ui.input_buffer.trim().to_string();
+        
+        // Remove existing filter for this column
+        self.ui.active_filters.retain(|f| f.col_idx != col_idx);
+
+        if val.is_empty() {
+            self.status_msg = format!("Filter cleared for {}", col_name);
+        } else {
+            let op = self.ui.current_filter_operator.clone();
+            let op_str = match op {
+                crate::db::ConditionOperator::Equals => "=",
+                crate::db::ConditionOperator::NotEquals => "!=",
+                crate::db::ConditionOperator::Contains => "~",
+                crate::db::ConditionOperator::NotContains => "!~",
+                _ => "?",
+            };
+            self.ui.active_filters.push(crate::db::Condition {
+                col_idx,
+                col_name: col_name.clone(),
+                operator: op,
+                value: val.clone(),
+                values: None,
+            });
+            self.status_msg = format!("Filter set: {} {} '{}'", col_name, op_str, val);
+        }
+        self.update_filtered_vals();
+    }
+
+    pub fn apply_list_filter(&mut self) {
+        let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
+        let col_name = self.db.headers[col_idx].clone();
+        
+        let selected_vals: Vec<String> = self.ui.multi_selected
+            .iter()
+            .filter(|(c, _)| *c == col_idx)
+            .map(|(_, v)| v.clone())
+            .collect();
+
+        if selected_vals.is_empty() {
+            return;
+        }
+
+        self.ui.active_filters.retain(|f| f.col_idx != col_idx);
+        
+        let count = selected_vals.len();
+        self.ui.active_filters.push(crate::db::Condition {
+            col_idx,
+            col_name: col_name.clone(),
+            operator: crate::db::ConditionOperator::InList,
+            value: format!("<{} values>", count),
+            values: Some(selected_vals),
+        });
+
+        self.ui.multi_selected.retain(|(c, _)| *c != col_idx);
+        self.status_msg = format!("Filter set: {} IN list ({} items)", col_name, count);
+        self.update_filtered_vals();
+    }
+
     pub fn move_list(&mut self, delta: i32) {
         match self.ui.active_pane {
             ActivePane::Columns => {
@@ -423,6 +551,15 @@ impl NormalizerApp {
                 let i = self.ui.val_list_state.selected().unwrap_or(0) as i32;
                 let next = (i + delta).rem_euclid(len as i32) as usize;
                 self.ui.val_list_state.select(Some(next));
+            }
+            ActivePane::MasterList => {
+                let len = self.norm.pipeline.len();
+                if len == 0 {
+                    return;
+                }
+                let i = self.ui.master_list_state.selected().unwrap_or(0) as i32;
+                let next = (i + delta).rem_euclid(len as i32) as usize;
+                self.ui.master_list_state.select(Some(next));
             }
         };
     }
@@ -449,12 +586,75 @@ impl NormalizerApp {
     pub fn update_filtered_vals(&mut self) {
         let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
         let search = self.ui.search_buffer.to_lowercase();
-        self.ui.filtered_indices = self.db.unique_values[col_idx]
+        
+        let mut row_indices: HashSet<usize> = (0..self.db.rows.len()).collect();
+        
+        for filter in &self.ui.active_filters {
+            row_indices.retain(|&r_idx| {
+                let val = &self.db.rows[r_idx][filter.col_idx];
+                match filter.operator {
+                    crate::db::ConditionOperator::Equals => val == &filter.value,
+                    crate::db::ConditionOperator::NotEquals => val != &filter.value,
+                    crate::db::ConditionOperator::Contains => val.contains(&filter.value),
+                    crate::db::ConditionOperator::NotContains => !val.contains(&filter.value),
+                    crate::db::ConditionOperator::GreaterThan => {
+                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                            v > f
+                        } else {
+                            val > &filter.value
+                        }
+                    }
+                    crate::db::ConditionOperator::LessThan => {
+                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                            v < f
+                        } else {
+                            val < &filter.value
+                        }
+                    }
+                    crate::db::ConditionOperator::GreaterOrEqual => {
+                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                            v >= f
+                        } else {
+                            val >= &filter.value
+                        }
+                    }
+                    crate::db::ConditionOperator::LessOrEqual => {
+                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                            v <= f
+                        } else {
+                            val <= &filter.value
+                        }
+                    }
+                    crate::db::ConditionOperator::InList => {
+                        if let Some(vals) = &filter.values {
+                            vals.contains(val)
+                        } else {
+                            true
+                        }
+                    }
+                }
+            });
+        }
+
+        let filtered_unique: Vec<usize> = self.db.unique_values[col_idx]
             .iter()
             .enumerate()
-            .filter(|(_, (_, lower))| lower.contains(&search))
+            .filter(|(_, (val, lower))| {
+                // Must be in search
+                if !lower.contains(&search) {
+                    return false;
+                }
+                // AND must exist in the rows that pass the filter
+                if let Some(registry_indices) = self.db.row_registry[col_idx].get(val) {
+                    registry_indices.iter().any(|idx| row_indices.contains(idx))
+                } else {
+                    false
+                }
+            })
             .map(|(i, _)| i)
             .collect();
+
+        self.ui.filtered_indices = filtered_unique;
 
         if let Some(selected) = self.ui.val_list_state.selected() {
             if selected >= self.ui.filtered_indices.len() {
@@ -516,6 +716,17 @@ impl NormalizerApp {
     }
 
     pub fn delete_current_mapping(&mut self) {
+        if self.ui.active_pane == ActivePane::MasterList {
+            if let Some(i) = self.ui.master_list_state.selected() {
+                if i < self.norm.pipeline.len() {
+                    self.norm.pipeline.remove(i);
+                    self.status_msg = "Removed step from pipeline".to_string();
+                    let _ = self.norm.save(&self.path);
+                }
+            }
+            return;
+        }
+
         let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
         let col_name = self.db.headers[col_idx].clone();
         if let Some(val_idx) = self.ui.val_list_state.selected() {
@@ -524,8 +735,21 @@ impl NormalizerApp {
             }
             let orig_idx = self.ui.filtered_indices[val_idx];
             let val = &self.db.unique_values[col_idx][orig_idx].0;
-            if let Some(col_map) = self.norm.mappings.get_mut(&col_name) {
-                col_map.remove(val);
+            
+            // Remove ALL steps that affect this specific column and value
+            let old_len = self.norm.pipeline.len();
+            self.norm.pipeline.retain(|step| {
+                match step {
+                    crate::db::TransformationStep::SimpleMap { column, original, .. } => {
+                        !(column == &col_name && original == val)
+                    }
+                    crate::db::TransformationStep::ConditionalMap { column, original, .. } => {
+                        !(column == &col_name && original == val)
+                    }
+                }
+            });
+            
+            if self.norm.pipeline.len() < old_len {
                 self.status_msg = format!("Removed mapping for '{}'", val);
                 let _ = self.norm.save(&self.path);
             }
@@ -563,19 +787,29 @@ impl NormalizerApp {
         }
 
         let batch_size = targets.len();
-        let total_mapped = {
-            let col_map = self.norm.mappings.entry(col_name.clone()).or_default();
-            for t in targets {
-                col_map.insert(t, self.ui.input_buffer.clone());
-            }
-            col_map.len()
-        };
+        for t in targets {
+            let step = if !self.ui.active_filters.is_empty() {
+                crate::db::TransformationStep::ConditionalMap {
+                    column: col_name.clone(),
+                    original: t,
+                    normalized: self.ui.input_buffer.clone(),
+                    conditions: self.ui.active_filters.clone(),
+                }
+            } else {
+                crate::db::TransformationStep::SimpleMap {
+                    column: col_name.clone(),
+                    original: t,
+                    normalized: self.ui.input_buffer.clone(),
+                }
+            };
+            self.norm.pipeline.push(step);
+        }
 
         let _ = self.norm.save(&self.path);
 
         self.status_msg = format!(
-            "Applied to {} items. Total mapped in '{}': {}",
-            batch_size, col_name, total_mapped
+            "Added {} steps to pipeline for '{}'.",
+            batch_size, col_name
         );
     }
 
@@ -586,18 +820,50 @@ impl NormalizerApp {
         wtr.write_record(&self.db.headers)?;
 
         for row in &self.db.rows {
-            let mut new_row = Vec::new();
-            for (c_idx, val) in row.iter().enumerate() {
-                let trimmed = val.trim();
-                let col_name = &self.db.headers[c_idx];
-                let final_val = self
-                    .norm
-                    .mappings
-                    .get(col_name)
-                    .and_then(|m| m.get(trimmed))
-                    .cloned()
-                    .unwrap_or_else(|| trimmed.to_string());
-                new_row.push(final_val);
+            let mut new_row = row.clone();
+            
+            // Apply pipeline in order
+            for step in &self.norm.pipeline {
+                match step {
+                    crate::db::TransformationStep::SimpleMap { column, original, normalized } => {
+                        if let Some(c_idx) = self.db.headers.iter().position(|h| h == column) {
+                            if new_row[c_idx].trim() == original {
+                                new_row[c_idx] = normalized.clone();
+                            }
+                        }
+                    }
+                    crate::db::TransformationStep::ConditionalMap { column, original, normalized, conditions } => {
+                        if let Some(c_idx) = self.db.headers.iter().position(|h| h == column) {
+                            if new_row[c_idx].trim() == original {
+                                // Check ALL conditions
+                                let mut all_match = true;
+                                for condition in conditions {
+                                    let cond_val = &new_row[condition.col_idx];
+                                    let matches = match condition.operator {
+                                        crate::db::ConditionOperator::Equals => cond_val == &condition.value,
+                                        crate::db::ConditionOperator::NotEquals => cond_val != &condition.value,
+                                        crate::db::ConditionOperator::Contains => cond_val.contains(&condition.value),
+                                        crate::db::ConditionOperator::NotContains => !cond_val.contains(&condition.value),
+                                        crate::db::ConditionOperator::InList => {
+                                            if let Some(vals) = &condition.values {
+                                                vals.contains(cond_val)
+                                            } else {
+                                                true
+                                            }
+                                        }
+                                    };
+                                    if !matches {
+                                        all_match = false;
+                                        break;
+                                    }
+                                }
+                                if all_match {
+                                    new_row[c_idx] = normalized.clone();
+                                }
+                            }
+                        }
+                    }
+                }
             }
             wtr.write_record(&new_row)?;
         }

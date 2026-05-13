@@ -84,6 +84,145 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
         .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
         .split(f.size());
 
+    if app.ui.active_pane == ActivePane::MasterList {
+        ui_master_list(f, app, chunks[0]);
+    } else {
+        ui_normalization_panes(f, app, chunks[0]);
+    }
+
+    let selection_count = app
+        .ui
+        .multi_selected
+        .iter()
+        .filter(|(c, _)| *c == app.ui.col_list_state.selected().unwrap_or(0))
+        .count();
+    let sel_tag = if selection_count > 0 {
+        format!(" [{} SELECTED] ", selection_count)
+            .on_cyan()
+            .black()
+            .bold()
+    } else {
+        Span::raw("")
+    };
+
+    let filter_tag = if !app.ui.active_filters.is_empty() {
+        let count = app.ui.active_filters.len();
+        let label = if count == 1 {
+            let f = &app.ui.active_filters[0];
+            let op_str = match f.operator {
+                crate::db::ConditionOperator::Equals => "=",
+                crate::db::ConditionOperator::NotEquals => "!=",
+                crate::db::ConditionOperator::Contains => "~",
+                crate::db::ConditionOperator::NotContains => "!~",
+                crate::db::ConditionOperator::GreaterThan => ">",
+                crate::db::ConditionOperator::LessThan => "<",
+                crate::db::ConditionOperator::GreaterOrEqual => ">=",
+                crate::db::ConditionOperator::LessOrEqual => "<=",
+                crate::db::ConditionOperator::InList => "IN",
+            };
+            format!(" [FILTER: {} {} '{}'] ", f.col_name, op_str, f.value)
+        } else {
+            format!(" [FILTERS ACTIVE: {}] ", count)
+        };
+        label.on_magenta().white().bold()
+    } else {
+        Span::raw("")
+    };
+
+    let footer = Line::from(vec![
+        Span::styled(format!(" Status: {} ", app.status_msg), Style::default().bg(Color::Blue).fg(Color::White)),
+        sel_tag,
+        filter_tag,
+        Span::raw(" | TAB: Switch | M: Master List | F: Filter | /: Search | SPACE: Select | ENTER: Map | DEL: Undo | S: Save | ESC: Dashboard "),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[1]);
+
+    if app.ui.input_mode == InputMode::Searching || !app.ui.search_buffer.is_empty() {
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)].as_ref())
+            .split(chunks[0]);
+            
+        let area = Rect::new(
+            main_chunks[1].x + 2,
+            main_chunks[1].y + 1,
+            main_chunks[1].width - 4,
+            3,
+        );
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Search Values ")
+            .border_style(
+                Style::default().fg(if app.ui.input_mode == InputMode::Searching {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            );
+        let p = Paragraph::new(format!(" /{}", app.ui.search_buffer)).block(block);
+        f.render_widget(p, area);
+    }
+
+    if app.ui.input_mode == InputMode::Editing || app.ui.input_mode == InputMode::Filtering {
+        // Position at bottom instead of center
+        let area = Rect::new(
+            f.size().width / 4,
+            f.size().height - 5,
+            f.size().width / 2,
+            4,
+        );
+        f.render_widget(Clear, area);
+        let (title, style) = if app.ui.input_mode == InputMode::Editing {
+            (" Normalize To: ", Style::default().fg(Color::Green))
+        } else {
+            let t = match app.ui.current_filter_operator {
+                crate::db::ConditionOperator::Equals => " Filter Equals (=): ",
+                crate::db::ConditionOperator::NotEquals => " Filter Not Equals (!=): ",
+                crate::db::ConditionOperator::Contains => " Filter Like (~): ",
+                crate::db::ConditionOperator::NotContains => " Filter Not Like (!~): ",
+                crate::db::ConditionOperator::GreaterThan => " Filter Greater Than (>): ",
+                crate::db::ConditionOperator::LessThan => " Filter Less Than (<): ",
+                crate::db::ConditionOperator::GreaterOrEqual => " Filter Greater or Equal (>=): ",
+                crate::db::ConditionOperator::LessOrEqual => " Filter Less or Equal (<=): ",
+                _ => " Filter: ",
+            };
+            (t, Style::default().fg(Color::Magenta))
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(style);
+        let p = Paragraph::new(format!("\n  {}", app.ui.input_buffer)).block(block);
+        f.render_widget(p, area);
+        f.set_cursor(
+            area.x + 3 + app.ui.input_buffer.chars().count() as u16,
+            area.y + 2,
+        );
+    }
+
+    if app.ui.input_mode == InputMode::SelectingKey {
+        let area = centered_rect(40, 60, f.size());
+        f.render_widget(Clear, area);
+        let items: Vec<ListItem> = app
+            .db
+            .headers
+            .iter()
+            .map(|h| ListItem::new(h.as_str()))
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Select Registry Key Column ")
+                    .border_style(Style::default().fg(Color::Magenta)),
+            )
+            .highlight_style(Style::default().bg(Color::Magenta).fg(Color::White));
+        f.render_stateful_widget(list, area, &mut app.ui.key_list_state);
+    }
+}
+
+fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(
@@ -94,7 +233,7 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
             ]
             .as_ref(),
         )
-        .split(chunks[0]);
+        .split(area);
 
     let active_key_name = &app.db.headers[app.ui.registry_key_col];
     let col_items: Vec<ListItem> = app
@@ -135,7 +274,7 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
     let col_name = &app.db.headers[col_idx];
     let mut val_items = Vec::new();
 
-    let col_map = app.norm.mappings.get(col_name);
+    // In pipeline mode, finding if a value is mapped is more complex
     for &orig_idx in &app.ui.filtered_indices {
         let val = &app.db.unique_values[col_idx][orig_idx].0;
         let mut spans = vec![];
@@ -143,15 +282,32 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
 
         if app.ui.multi_selected.contains(&(col_idx, val.clone())) {
             spans.push("[x] ".cyan().bold());
-        } else if col_map.and_then(|m| m.get(val)).is_some() {
-            spans.push("[✓] ".green());
         } else {
-            spans.push("[ ] ".dark_gray());
+            // Check if any step in pipeline affects this
+            let is_mapped = app.norm.pipeline.iter().any(|step| match step {
+                crate::db::TransformationStep::SimpleMap { column, original, .. } => column == col_name && original == val,
+                crate::db::TransformationStep::ConditionalMap { column, original, .. } => column == col_name && original == val,
+            });
+            if is_mapped {
+                spans.push("[✓] ".green());
+            } else {
+                spans.push("[ ] ".dark_gray());
+            }
         }
 
-        if let Some(norm) = col_map.and_then(|m| m.get(val)) {
+        // Find the LAST normalization applied to this value (in current pipeline view)
+        let last_norm = app.norm.pipeline.iter().rev().find(|step| match step {
+            crate::db::TransformationStep::SimpleMap { column, original, .. } => column == col_name && original == val,
+            crate::db::TransformationStep::ConditionalMap { column, original, .. } => column == col_name && original == val,
+        });
+
+        if let Some(step) = last_norm {
+            let norm_val = match step {
+                crate::db::TransformationStep::SimpleMap { normalized, .. } => normalized,
+                crate::db::TransformationStep::ConditionalMap { normalized, .. } => normalized,
+            };
             spans.push(Span::raw(format!("{} ➜ ", display_val)));
-            spans.push(norm.clone().yellow().bold());
+            spans.push(norm_val.clone().yellow().bold());
         } else {
             spans.push(Span::raw(display_val));
         }
@@ -196,83 +352,54 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
         main_chunks[2],
         &mut app.ui.val_list_state.clone(),
     );
+}
 
-    let selection_count = app
-        .ui
-        .multi_selected
-        .iter()
-        .filter(|(c, _)| *c == col_idx)
-        .count();
-    let sel_tag = if selection_count > 0 {
-        format!(" [{} SELECTED] ", selection_count)
-            .on_cyan()
-            .black()
-            .bold()
-    } else {
-        Span::raw("")
-    };
-
-    let footer = Line::from(vec![
-        Span::styled(format!(" Status: {} ", app.status_msg), Style::default().bg(Color::Blue).fg(Color::White)),
-        sel_tag,
-        Span::raw(" | TAB: Switch | /: Search | SPACE: Select | ENTER: Map | DEL: Undo | K: Set Key | S: Save | ESC: Dashboard "),
-    ]);
-    f.render_widget(Paragraph::new(footer), chunks[1]);
-
-    if app.ui.input_mode == InputMode::Searching || !app.ui.search_buffer.is_empty() {
-        let area = Rect::new(
-            main_chunks[1].x + 2,
-            main_chunks[1].y + 1,
-            main_chunks[1].width - 4,
-            3,
-        );
-        f.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Search Values ")
-            .border_style(
-                Style::default().fg(if app.ui.input_mode == InputMode::Searching {
-                    Color::Yellow
+fn ui_master_list(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
+    let items: Vec<ListItem> = app.norm.pipeline.iter().enumerate().map(|(idx, step)| {
+        let mut spans = vec![Span::raw(format!("{:02}. ", idx + 1))];
+        match step {
+            crate::db::TransformationStep::SimpleMap { column, original, normalized } => {
+                spans.push(column.clone().magenta());
+                spans.push(Span::raw(": "));
+                spans.push(original.clone().white());
+                spans.push(Span::raw(" ➜ "));
+                spans.push(normalized.clone().yellow().bold());
+            }
+            crate::db::TransformationStep::ConditionalMap { column, original, normalized, conditions } => {
+                spans.push(column.clone().magenta());
+                spans.push(Span::raw(": "));
+                spans.push(original.clone().white());
+                spans.push(Span::raw(" ➜ "));
+                spans.push(normalized.clone().yellow().bold());
+                let cond_str = if conditions.len() == 1 {
+                    let c = &conditions[0];
+                    let op = match c.operator {
+                        crate::db::ConditionOperator::Equals => "=",
+                        crate::db::ConditionOperator::NotEquals => "!=",
+                        crate::db::ConditionOperator::Contains => "~",
+                        crate::db::ConditionOperator::NotContains => "!~",
+                        crate::db::ConditionOperator::InList => "IN",
+                    };
+                    format!(" [IF {} {} '{}']", c.col_name, op, c.value)
                 } else {
-                    Color::DarkGray
-                }),
-            );
-        let p = Paragraph::new(format!(" /{}", app.ui.search_buffer)).block(block);
-        f.render_widget(p, area);
-    }
+                    format!(" [{} FILTERS]", conditions.len())
+                };
+                spans.push(Span::raw(cond_str).cyan());
+            }
+        }
+        ListItem::new(Line::from(spans))
+    }).collect();
 
-    if app.ui.input_mode == InputMode::Editing {
-        let area = centered_rect(60, 20, f.size());
-        f.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Normalize To: ")
-            .border_style(Style::default().fg(Color::Green));
-        let p = Paragraph::new(format!("\n  {}", app.ui.input_buffer)).block(block);
-        f.render_widget(p, area);
-        f.set_cursor(
-            area.x + 3 + app.ui.input_buffer.chars().count() as u16,
-            area.y + 2,
-        );
-    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Master Transformation Pipeline (Order Matters) ")
+        .border_style(Style::default().fg(Color::Yellow));
 
-    if app.ui.input_mode == InputMode::SelectingKey {
-        let area = centered_rect(40, 60, f.size());
-        f.render_widget(Clear, area);
-        let items: Vec<ListItem> = app
-            .db
-            .headers
-            .iter()
-            .map(|h| ListItem::new(h.as_str()))
-            .collect();
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Select Registry Key Column ")
-                    .border_style(Style::default().fg(Color::Magenta)),
-            )
-            .highlight_style(Style::default().bg(Color::Magenta).fg(Color::White));
-        f.render_stateful_widget(list, area, &mut app.ui.key_list_state);
-    }
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().bg(Color::Indexed(237)).fg(Color::Yellow).bold()),
+        area,
+        &mut app.ui.master_list_state,
+    );
 }
