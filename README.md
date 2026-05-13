@@ -21,14 +21,14 @@ A blazing-fast, terminal-based CSV normalization tool. `normie-rs` helps you qui
 
 ### Binary Releases
 
-You can download pre-compiled binaries for your platform from the [v0.5.0 Release](https://github.com/GoldTone/normie-rs/releases/tag/v0.5.0).
+You can download pre-compiled binaries for your platform from the [v1.1.1 Release](https://github.com/SirMarshall/normie-rs/releases/tag/v1.1.1).
 
 ### From Source
 
 Ensure you have [Rust](https://rustup.rs/) and `cargo` installed.
 
 ```bash
-git clone https://github.com/GoldTone/normie-rs.git
+git clone https://github.com/SirMarshall/normie-rs.git
 cd normie-rs
 cargo install --path .
 ```
