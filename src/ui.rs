@@ -133,7 +133,7 @@ fn ui_normalizer(f: &mut Frame, app: &mut NormalizerApp) {
         Span::styled(format!(" Status: {} ", app.status_msg), Style::default().bg(Color::Blue).fg(Color::White)),
         sel_tag,
         filter_tag,
-        Span::raw(" | TAB: Switch | M: Master List | F: Filter | /: Search | SPACE: Select | ENTER: Map | DEL: Undo | S: Save | ESC: Dashboard "),
+        Span::raw(" | TAB: Switch | M: Master List | F: Filter | /: Search | SPACE: Select | ENTER: Map | DEL: Undo | S: Save | Q/ESC: Dashboard "),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[1]);
 

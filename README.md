@@ -8,7 +8,7 @@ A blazing-fast, terminal-based CSV normalization tool. `normie-rs` helps you qui
 
 - **Dashboard & Splash Screen**: Quick access to recent files or start a new session.
 - **TUI File Browser**: Navigate your local file system and pick CSVs without leaving the terminal.
-- **Auto-Collate Recent Files**: Remembers your last 10 opened files for instant access.
+- **Recent File Tracking**: Remembers your last 10 opened files for instant access.
 - **Intelligent Normalization**: 
   - View unique values per column.
   - Search and filter values.
@@ -21,7 +21,7 @@ A blazing-fast, terminal-based CSV normalization tool. `normie-rs` helps you qui
 
 ### Binary Releases
 
-You can download pre-compiled binaries for your platform from the [v0.1.0 Release](https://github.com/SirMarshall/normie-rs/releases/tag/v0.1.0).
+You can download pre-compiled binaries for your platform from the [v0.5.0 Release](https://github.com/GoldTone/normie-rs/releases/tag/v0.5.0).
 
 ### From Source
 
@@ -55,18 +55,20 @@ normie-rs
 - `UP/DOWN`: Navigate files.
 - `ENTER`: Open CSV or enter Directory.
 - `BACKSPACE`: Go to parent directory.
-- `ESC`: Return to Dashboard.
+- `Q / ESC`: Return to Dashboard.
 
 #### Normalizer
 - `TAB`: Switch between **Columns** and **Unique Values** panes.
+- `M`: Toggle **Master Transformation Pipeline** view.
 - `UP/DOWN`: Navigate the active list.
-- `SPACE`: Multi-select values for batch mapping.
+- `SPACE`: Multi-select values for batch mapping or filtering.
 - `ENTER`: Open **Normalization Modal** to map selected/highlighted value(s).
-- `/`: Open **Search Modal** to filter unique values.
+- `/`: Open **Search Modal** to filter unique values in the current column.
+- `F`: Open **Conditional Filter Modal** (or clear filter if already set).
 - `K`: Open **Key Selection Modal** to change the Source Key column.
 - `S`: Save normalized CSV.
-- `DELETE / BACKSPACE`: Remove a mapping.
-- `ESC`: Return to Dashboard.
+- `DELETE / BACKSPACE`: Remove a mapping (or a pipeline step in Master view).
+- `Q / ESC`: Return to Dashboard.
 
 ## Data & Configuration
 
