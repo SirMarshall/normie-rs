@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -74,7 +74,15 @@ fn ui_file_browser(f: &mut Frame, state: &mut FileBrowserState) {
         .highlight_style(Style::default().bg(Color::Indexed(237)).fg(Color::Yellow).bold());
     f.render_stateful_widget(list, chunks[1], &mut state.entries.state);
 
-    let footer = Paragraph::new(" ENTER: Open/Enter | BACKSPACE: Up | ESC: Dashboard ");
+    let footer_content = if let Some(err) = &state.error_msg {
+        Line::from(vec![
+            Span::styled(format!(" ERROR: {} ", err), Style::default().bg(Color::Red).fg(Color::White).bold()),
+            Span::raw(" | ENTER: Open/Enter | BACKSPACE: Up | ESC: Dashboard "),
+        ])
+    } else {
+        Line::from(" ENTER: Open/Enter | BACKSPACE: Up | ESC: Dashboard ")
+    };
+    let footer = Paragraph::new(footer_content);
     f.render_widget(footer, chunks[2]);
 }
 
@@ -272,10 +280,29 @@ fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
 
     let col_idx = app.ui.col_list_state.selected().unwrap_or(0);
     let col_name = &app.db.headers[col_idx];
-    let mut val_items = Vec::new();
+    
+    // Compute viewport window slicing for high performance
+    let total_count = app.ui.filtered_indices.len();
+    let height = main_chunks[1].height as usize;
+    let selected = app.ui.val_list_state.selected();
+    
+    let visible_height = height.saturating_sub(2);
+    let (start, end, relative_sel) = if total_count == 0 || visible_height == 0 {
+        (0, 0, None)
+    } else {
+        let sel = selected.unwrap_or(0);
+        let half_height = visible_height / 2;
+        let start = sel.saturating_sub(half_height);
+        let end = (start + visible_height).min(total_count);
+        let start = end.saturating_sub(visible_height);
+        let relative_sel = selected.map(|s| s - start);
+        (start, end, relative_sel)
+    };
 
-    // In pipeline mode, finding if a value is mapped is more complex
-    for &orig_idx in &app.ui.filtered_indices {
+    let mut val_items = Vec::new();
+    let slice = if total_count > 0 { &app.ui.filtered_indices[start..end] } else { &[] };
+
+    for &orig_idx in slice {
         let val = &app.db.unique_values[col_idx][orig_idx].0;
         let mut spans = vec![];
         let display_val = if val.is_empty() { "(EMPTY)" } else { val };
@@ -283,11 +310,8 @@ fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
         if app.ui.multi_selected.contains(&(col_idx, val.clone())) {
             spans.push("[x] ".cyan().bold());
         } else {
-            // Check if any step in pipeline affects this
-            let is_mapped = app.norm.pipeline.iter().any(|step| match step {
-                crate::db::TransformationStep::SimpleMap { column, original, .. } => column == col_name && original == val,
-                crate::db::TransformationStep::ConditionalMap { column, original, .. } => column == col_name && original == val,
-            });
+            // Check pre-calculated mapping cache (O(1) lookup)
+            let is_mapped = app.pipeline_cache.contains_key(&(col_name.clone(), val.clone()));
             if is_mapped {
                 spans.push("[✓] ".green());
             } else {
@@ -295,11 +319,8 @@ fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
             }
         }
 
-        // Find the LAST normalization applied to this value (in current pipeline view)
-        let last_norm = app.norm.pipeline.iter().rev().find(|step| match step {
-            crate::db::TransformationStep::SimpleMap { column, original, .. } => column == col_name && original == val,
-            crate::db::TransformationStep::ConditionalMap { column, original, .. } => column == col_name && original == val,
-        });
+        // Find the LAST normalization applied to this value (O(1) lookup)
+        let last_norm = app.pipeline_cache.get(&(col_name.clone(), val.clone()));
 
         if let Some(step) = last_norm {
             let norm_val = match step {
@@ -325,19 +346,24 @@ fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
             }),
         );
 
+    let mut temp_val_state = ListState::default();
+    temp_val_state.select(relative_sel);
+
     f.render_stateful_widget(
         List::new(val_items)
             .block(val_block)
             .highlight_style(Style::default().bg(Color::Indexed(237))),
         main_chunks[1],
-        &mut app.ui.val_list_state,
+        &mut temp_val_state,
     );
 
-    let info_items: Vec<ListItem> = app
-        .ui
-        .info_results
+    // Render source key mappings on the fly for visible elements only
+    let info_items: Vec<ListItem> = slice
         .iter()
-        .map(|s| ListItem::new(s.as_str()))
+        .map(|&orig_idx| {
+            let key_val = calculate_single_info(app, col_idx, orig_idx);
+            ListItem::new(key_val)
+        })
         .collect();
 
     let key_block = Block::default()
@@ -350,7 +376,7 @@ fn ui_normalization_panes(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
             .block(key_block)
             .highlight_style(Style::default().bg(Color::Indexed(237))),
         main_chunks[2],
-        &mut app.ui.val_list_state.clone(),
+        &mut temp_val_state.clone(),
     );
 }
 
@@ -406,4 +432,34 @@ fn ui_master_list(f: &mut Frame, app: &mut NormalizerApp, area: Rect) {
         area,
         &mut app.ui.master_list_state,
     );
+}
+
+fn calculate_single_info(app: &NormalizerApp, col_idx: usize, orig_idx: usize) -> String {
+    let val = &app.db.unique_values[col_idx][orig_idx].0;
+    if let Some(indices) = app.db.row_registry[col_idx].get(val.as_str()) {
+        let mut keys: Vec<&str> = indices
+            .iter()
+            .map(|&idx| app.db.columns[app.ui.registry_key_col].values[idx].as_ref())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.is_empty() {
+            "-".to_string()
+        } else {
+            let mut joined = String::new();
+            for (i, &k) in keys.iter().enumerate() {
+                if i > 0 {
+                    joined.push_str(", ");
+                }
+                if k.is_empty() {
+                    joined.push_str("(EMPTY)");
+                } else {
+                    joined.push_str(k);
+                }
+            }
+            joined
+        }
+    } else {
+        "-".to_string()
+    }
 }

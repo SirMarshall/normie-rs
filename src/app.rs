@@ -8,7 +8,28 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
+    rc::Rc,
 };
+
+pub struct Interner {
+    pool: HashMap<String, Rc<str>>,
+}
+
+impl Interner {
+    pub fn new() -> Self {
+        Self { pool: HashMap::new() }
+    }
+    
+    pub fn intern(&mut self, s: &str) -> Rc<str> {
+        if let Some(rc) = self.pool.get(s) {
+            rc.clone()
+        } else {
+            let rc: Rc<str> = Rc::from(s);
+            self.pool.insert(s.to_string(), rc.clone());
+            rc
+        }
+    }
+}
 
 pub enum Action {
     None,
@@ -129,6 +150,7 @@ impl DashboardState {
 pub struct FileBrowserState {
     pub current_dir: PathBuf,
     pub entries: StatefulList<PathBuf>,
+    pub error_msg: Option<String>,
 }
 
 impl FileBrowserState {
@@ -136,6 +158,7 @@ impl FileBrowserState {
         let mut s = Self {
             current_dir: dir,
             entries: StatefulList::new(),
+            error_msg: None,
         };
         s.refresh();
         s
@@ -168,6 +191,7 @@ impl FileBrowserState {
     }
 
     pub fn handle_event(&mut self, config: &mut Config, key: KeyEvent) -> Action {
+        self.error_msg = None;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::Navigate(AppState::Dashboard(DashboardState::new())),
             KeyCode::Up => {
@@ -193,11 +217,15 @@ impl FileBrowserState {
                         self.refresh();
                         Action::None
                     } else {
-                        if let Ok(normalizer) = load_normalizer(path.clone()) {
-                            config.add_recent(path);
-                            Action::Navigate(AppState::Normalizer(Box::new(normalizer)))
-                        } else {
-                            Action::None
+                        match load_normalizer(path.clone()) {
+                            Ok(normalizer) => {
+                                config.add_recent(path);
+                                Action::Navigate(AppState::Normalizer(Box::new(normalizer)))
+                            }
+                            Err(e) => {
+                                self.error_msg = Some(format!("{}", e));
+                                Action::None
+                            }
                         }
                     }
                 } else {
@@ -237,7 +265,6 @@ pub struct UiState {
     pub master_list_state: ListState,
     pub multi_selected: HashSet<(usize, String)>,
     pub registry_key_col: usize,
-    pub info_results: Vec<String>,
     pub active_filters: Vec<crate::db::Condition>,
     pub current_filter_operator: crate::db::ConditionOperator,
 }
@@ -246,32 +273,74 @@ pub struct NormalizerApp {
     pub path: PathBuf,
     pub db: Database,
     pub norm: NormalizationState,
+    pub pipeline_cache: HashMap<(String, String), crate::db::TransformationStep>,
     pub ui: UiState,
     pub status_msg: String,
 }
 
 impl NormalizerApp {
-    pub fn new(path: PathBuf, headers: csv::StringRecord, rows: Vec<Vec<String>>) -> Self {
-        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        let mut row_registry: Vec<HashMap<String, Vec<usize>>> =
-            vec![HashMap::new(); headers.len()];
-        let mut unique_values_sets: Vec<HashSet<String>> = vec![HashSet::new(); headers.len()];
+    pub fn rebuild_pipeline_cache(&mut self) {
+        self.pipeline_cache.clear();
+        for step in &self.norm.pipeline {
+            match step {
+                crate::db::TransformationStep::SimpleMap { column, original, .. } => {
+                    self.pipeline_cache.insert((column.clone(), original.clone()), step.clone());
+                }
+                crate::db::TransformationStep::ConditionalMap { column, original, .. } => {
+                    self.pipeline_cache.insert((column.clone(), original.clone()), step.clone());
+                }
+            }
+        }
+    }
 
-        for (r_idx, row) in rows.iter().enumerate() {
-            for (c_idx, val) in row.iter().enumerate() {
-                let trimmed = val.trim().to_string();
-                unique_values_sets[c_idx].insert(trimmed.clone());
-                row_registry[c_idx].entry(trimmed).or_default().push(r_idx);
+    pub fn save_norm(&mut self) {
+        if let Err(e) = self.norm.save(&self.path) {
+            self.status_msg = format!("ERROR: Failed to save mappings: {}", e);
+        }
+    }
+
+    pub fn new(path: PathBuf, headers: csv::StringRecord, raw_rows: Vec<Vec<String>>) -> Self {
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let num_rows = raw_rows.len();
+        let num_cols = headers.len();
+
+        let mut interner = Interner::new();
+        let mut columns = Vec::with_capacity(num_cols);
+        for _ in 0..num_cols {
+            columns.push(crate::db::ColumnData {
+                values: Vec::with_capacity(num_rows),
+                numeric_values: Vec::with_capacity(num_rows),
+            });
+        }
+
+        let mut row_registry: Vec<HashMap<Rc<str>, Vec<usize>>> = vec![HashMap::new(); num_cols];
+        let mut unique_values_sets: Vec<HashSet<Rc<str>>> = vec![HashSet::new(); num_cols];
+
+        for (r_idx, row) in raw_rows.into_iter().enumerate() {
+            for (c_idx, val) in row.into_iter().enumerate() {
+                if c_idx >= num_cols {
+                    break;
+                }
+                let trimmed = val.trim();
+                let interned = interner.intern(trimmed);
+                let parsed_num = trimmed.parse::<f64>().ok();
+
+                columns[c_idx].values.push(interned.clone());
+                columns[c_idx].numeric_values.push(parsed_num);
+
+                unique_values_sets[c_idx].insert(interned.clone());
+                row_registry[c_idx].entry(interned).or_default().push(r_idx);
             }
         }
 
         let unique_values: Vec<Vec<(String, String)>> = unique_values_sets
             .into_iter()
             .map(|set| {
-                let mut v: Vec<String> = set.into_iter().collect();
+                let mut v: Vec<Rc<str>> = set.into_iter().collect();
                 v.sort_by_cached_key(|a| a.to_lowercase());
                 v.into_iter()
-                    .map(|s| {
+                    .map(|rc| {
+                        let s = rc.to_string();
                         let lower = s.to_lowercase();
                         (s, lower)
                     })
@@ -292,10 +361,12 @@ impl NormalizerApp {
             path,
             db: Database {
                 headers,
-                rows,
+                columns,
                 unique_values,
                 row_registry,
+                num_rows,
             },
+            pipeline_cache: HashMap::new(),
             ui: UiState {
                 active_pane: ActivePane::Columns,
                 input_mode: InputMode::Normal,
@@ -308,12 +379,12 @@ impl NormalizerApp {
                 master_list_state: ListState::default(),
                 multi_selected: HashSet::new(),
                 registry_key_col: initial_key_idx,
-                info_results: Vec::new(),
                 active_filters: Vec::new(),
                 current_filter_operator: crate::db::ConditionOperator::Contains,
             },
             status_msg: "Ready (Mappings Loaded)".to_string(),
         };
+        app.rebuild_pipeline_cache();
         app.update_filtered_vals();
         app
     }
@@ -325,7 +396,9 @@ impl NormalizerApp {
                     return Action::Navigate(AppState::Dashboard(DashboardState::new()));
                 }
                 KeyCode::Char('s') => {
-                    let _ = self.save_csv();
+                    if let Err(e) = self.save_csv() {
+                        self.status_msg = format!("ERROR: Failed to save CSV: {}", e);
+                    }
                 }
                 KeyCode::Char('m') => {
                     self.ui.active_pane = if self.ui.active_pane == ActivePane::MasterList {
@@ -503,7 +576,7 @@ impl NormalizerApp {
         let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
         let col_name = self.db.headers[col_idx].clone();
         
-        let selected_vals: Vec<String> = self.ui.multi_selected
+        let mut selected_vals: Vec<String> = self.ui.multi_selected
             .iter()
             .filter(|(c, _)| *c == col_idx)
             .map(|(_, v)| v.clone())
@@ -512,6 +585,8 @@ impl NormalizerApp {
         if selected_vals.is_empty() {
             return;
         }
+
+        selected_vals.sort_unstable();
 
         self.ui.active_filters.retain(|f| f.col_idx != col_idx);
         
@@ -587,53 +662,60 @@ impl NormalizerApp {
         let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
         let search = self.ui.search_buffer.to_lowercase();
         
-        let mut row_indices: HashSet<usize> = (0..self.db.rows.len()).collect();
+        let mut row_indices = vec![true; self.db.num_rows];
         
         for filter in &self.ui.active_filters {
-            row_indices.retain(|&r_idx| {
-                let val = &self.db.rows[r_idx][filter.col_idx];
-                match filter.operator {
-                    crate::db::ConditionOperator::Equals => val == &filter.value,
-                    crate::db::ConditionOperator::NotEquals => val != &filter.value,
+            let filter_f = filter.value.parse::<f64>().ok();
+            for (r_idx, pass) in row_indices.iter_mut().enumerate() {
+                if !*pass {
+                    continue;
+                }
+                let val = &self.db.columns[filter.col_idx].values[r_idx];
+                let matches = match filter.operator {
+                    crate::db::ConditionOperator::Equals => val.as_ref() == &filter.value,
+                    crate::db::ConditionOperator::NotEquals => val.as_ref() != &filter.value,
                     crate::db::ConditionOperator::Contains => val.contains(&filter.value),
                     crate::db::ConditionOperator::NotContains => !val.contains(&filter.value),
                     crate::db::ConditionOperator::GreaterThan => {
-                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                        if let (Some(v), Some(f)) = (self.db.columns[filter.col_idx].numeric_values[r_idx], filter_f) {
                             v > f
                         } else {
-                            val > &filter.value
+                            val.as_ref() > &filter.value
                         }
                     }
                     crate::db::ConditionOperator::LessThan => {
-                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                        if let (Some(v), Some(f)) = (self.db.columns[filter.col_idx].numeric_values[r_idx], filter_f) {
                             v < f
                         } else {
-                            val < &filter.value
+                            val.as_ref() < &filter.value
                         }
                     }
                     crate::db::ConditionOperator::GreaterOrEqual => {
-                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                        if let (Some(v), Some(f)) = (self.db.columns[filter.col_idx].numeric_values[r_idx], filter_f) {
                             v >= f
                         } else {
-                            val >= &filter.value
+                            val.as_ref() >= &filter.value
                         }
                     }
                     crate::db::ConditionOperator::LessOrEqual => {
-                        if let (Ok(v), Ok(f)) = (val.parse::<f64>(), filter.value.parse::<f64>()) {
+                        if let (Some(v), Some(f)) = (self.db.columns[filter.col_idx].numeric_values[r_idx], filter_f) {
                             v <= f
                         } else {
-                            val <= &filter.value
+                            val.as_ref() <= &filter.value
                         }
                     }
                     crate::db::ConditionOperator::InList => {
                         if let Some(vals) = &filter.values {
-                            vals.contains(val)
+                            vals.binary_search(&val.to_string()).is_ok()
                         } else {
                             true
                         }
                     }
+                };
+                if !matches {
+                    *pass = false;
                 }
-            });
+            }
         }
 
         let filtered_unique: Vec<usize> = self.db.unique_values[col_idx]
@@ -645,8 +727,8 @@ impl NormalizerApp {
                     return false;
                 }
                 // AND must exist in the rows that pass the filter
-                if let Some(registry_indices) = self.db.row_registry[col_idx].get(val) {
-                    registry_indices.iter().any(|idx| row_indices.contains(idx))
+                if let Some(registry_indices) = self.db.row_registry[col_idx].get(val.as_str()) {
+                    registry_indices.iter().any(|&idx| idx < row_indices.len() && row_indices[idx])
                 } else {
                     false
                 }
@@ -674,40 +756,7 @@ impl NormalizerApp {
     }
 
     pub fn calculate_info(&mut self) {
-        let col_idx = self.ui.col_list_state.selected().unwrap_or(0);
-
-        let mut results: Vec<String> = Vec::with_capacity(self.ui.filtered_indices.len());
-        for &orig_idx in &self.ui.filtered_indices {
-            let val = &self.db.unique_values[col_idx][orig_idx].0;
-            let key_val = if let Some(indices) = self.db.row_registry[col_idx].get(val) {
-                let mut keys: Vec<&str> = indices
-                    .iter()
-                    .map(|&idx| self.db.rows[idx][self.ui.registry_key_col].as_str())
-                    .collect();
-                keys.sort_unstable();
-                keys.dedup();
-                if keys.is_empty() {
-                    "-".to_string()
-                } else {
-                    let mut joined = String::new();
-                    for (i, &k) in keys.iter().enumerate() {
-                        if i > 0 {
-                            joined.push_str(", ");
-                        }
-                        if k.is_empty() {
-                            joined.push_str("(EMPTY)");
-                        } else {
-                            joined.push_str(k);
-                        }
-                    }
-                    joined
-                }
-            } else {
-                "-".to_string()
-            };
-            results.push(key_val);
-        }
-        self.ui.info_results = results;
+        // Calculated on the fly in the UI rendering loop to avoid overhead
     }
 
     pub fn has_selections_in_current_col(&self) -> bool {
@@ -720,8 +769,9 @@ impl NormalizerApp {
             if let Some(i) = self.ui.master_list_state.selected() {
                 if i < self.norm.pipeline.len() {
                     self.norm.pipeline.remove(i);
+                    self.rebuild_pipeline_cache();
                     self.status_msg = "Removed step from pipeline".to_string();
-                    let _ = self.norm.save(&self.path);
+                    self.save_norm();
                 }
             }
             return;
@@ -734,24 +784,25 @@ impl NormalizerApp {
                 return;
             }
             let orig_idx = self.ui.filtered_indices[val_idx];
-            let val = &self.db.unique_values[col_idx][orig_idx].0;
+            let val = self.db.unique_values[col_idx][orig_idx].0.clone();
             
             // Remove ALL steps that affect this specific column and value
             let old_len = self.norm.pipeline.len();
             self.norm.pipeline.retain(|step| {
                 match step {
                     crate::db::TransformationStep::SimpleMap { column, original, .. } => {
-                        !(column == &col_name && original == val)
+                        !(column == &col_name && original == &val)
                     }
                     crate::db::TransformationStep::ConditionalMap { column, original, .. } => {
-                        !(column == &col_name && original == val)
+                        !(column == &col_name && original == &val)
                     }
                 }
             });
             
             if self.norm.pipeline.len() < old_len {
+                self.rebuild_pipeline_cache();
                 self.status_msg = format!("Removed mapping for '{}'", val);
-                let _ = self.norm.save(&self.path);
+                self.save_norm();
             }
         }
     }
@@ -805,7 +856,8 @@ impl NormalizerApp {
             self.norm.pipeline.push(step);
         }
 
-        let _ = self.norm.save(&self.path);
+        self.rebuild_pipeline_cache();
+        self.save_norm();
 
         self.status_msg = format!(
             "Added {} steps to pipeline for '{}'.",
@@ -819,75 +871,86 @@ impl NormalizerApp {
         let mut wtr = csv::Writer::from_path(&output_path)?;
         wtr.write_record(&self.db.headers)?;
 
-        for row in &self.db.rows {
-            let mut new_row = row.clone();
+        // Pre-resolve step column indices to avoid linear search on every row
+        let step_indices: Vec<Option<usize>> = self.norm.pipeline.iter()
+            .map(|step| {
+                let col_name = match step {
+                    crate::db::TransformationStep::SimpleMap { column, .. } => column,
+                    crate::db::TransformationStep::ConditionalMap { column, .. } => column,
+                };
+                self.db.headers.iter().position(|h| h == col_name)
+            })
+            .collect();
+
+        for r_idx in 0..self.db.num_rows {
+            let mut new_row: Vec<String> = self.db.columns.iter()
+                .map(|col| col.values[r_idx].to_string())
+                .collect();
             
-            // Apply pipeline in order
-            for step in &self.norm.pipeline {
+            for (step_idx, step) in self.norm.pipeline.iter().enumerate() {
+                let Some(c_idx) = step_indices[step_idx] else {
+                    continue;
+                };
+                
                 match step {
-                    crate::db::TransformationStep::SimpleMap { column, original, normalized } => {
-                        if let Some(c_idx) = self.db.headers.iter().position(|h| h == column) {
-                            if new_row[c_idx].trim() == original {
-                                new_row[c_idx] = normalized.clone();
-                            }
+                    crate::db::TransformationStep::SimpleMap { original, normalized, .. } => {
+                        if new_row[c_idx].trim() == original {
+                            new_row[c_idx] = normalized.clone();
                         }
                     }
-                    crate::db::TransformationStep::ConditionalMap { column, original, normalized, conditions } => {
-                        if let Some(c_idx) = self.db.headers.iter().position(|h| h == column) {
-                            if new_row[c_idx].trim() == original {
-                                // Check ALL conditions
-                                let mut all_match = true;
-                                for condition in conditions {
-                                    let cond_val = &new_row[condition.col_idx];
-                                    let matches = match condition.operator {
-                                        crate::db::ConditionOperator::Equals => cond_val == &condition.value,
-                                        crate::db::ConditionOperator::NotEquals => cond_val != &condition.value,
-                                        crate::db::ConditionOperator::Contains => cond_val.contains(&condition.value),
-                                        crate::db::ConditionOperator::NotContains => !cond_val.contains(&condition.value),
-                                        crate::db::ConditionOperator::GreaterThan => {
-                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
-                                                v > f
-                                            } else {
-                                                cond_val > &condition.value
-                                            }
+                    crate::db::TransformationStep::ConditionalMap { original, normalized, conditions, .. } => {
+                        if new_row[c_idx].trim() == original {
+                            let mut all_match = true;
+                            for condition in conditions {
+                                let cond_val = &new_row[condition.col_idx];
+                                let matches = match condition.operator {
+                                    crate::db::ConditionOperator::Equals => cond_val == &condition.value,
+                                    crate::db::ConditionOperator::NotEquals => cond_val != &condition.value,
+                                    crate::db::ConditionOperator::Contains => cond_val.contains(&condition.value),
+                                    crate::db::ConditionOperator::NotContains => !cond_val.contains(&condition.value),
+                                    crate::db::ConditionOperator::GreaterThan => {
+                                        if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                            v > f
+                                        } else {
+                                            cond_val > &condition.value
                                         }
-                                        crate::db::ConditionOperator::LessThan => {
-                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
-                                                v < f
-                                            } else {
-                                                cond_val < &condition.value
-                                            }
-                                        }
-                                        crate::db::ConditionOperator::GreaterOrEqual => {
-                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
-                                                v >= f
-                                            } else {
-                                                cond_val >= &condition.value
-                                            }
-                                        }
-                                        crate::db::ConditionOperator::LessOrEqual => {
-                                            if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
-                                                v <= f
-                                            } else {
-                                                cond_val <= &condition.value
-                                            }
-                                        }
-                                        crate::db::ConditionOperator::InList => {
-                                            if let Some(vals) = &condition.values {
-                                                vals.contains(cond_val)
-                                            } else {
-                                                true
-                                            }
-                                        }
-                                    };
-                                    if !matches {
-                                        all_match = false;
-                                        break;
                                     }
+                                    crate::db::ConditionOperator::LessThan => {
+                                        if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                            v < f
+                                        } else {
+                                            cond_val < &condition.value
+                                        }
+                                    }
+                                    crate::db::ConditionOperator::GreaterOrEqual => {
+                                        if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                            v >= f
+                                        } else {
+                                            cond_val >= &condition.value
+                                        }
+                                    }
+                                    crate::db::ConditionOperator::LessOrEqual => {
+                                        if let (Ok(v), Ok(f)) = (cond_val.parse::<f64>(), condition.value.parse::<f64>()) {
+                                            v <= f
+                                        } else {
+                                            cond_val <= &condition.value
+                                        }
+                                    }
+                                    crate::db::ConditionOperator::InList => {
+                                        if let Some(vals) = &condition.values {
+                                            vals.contains(cond_val)
+                                        } else {
+                                            true
+                                        }
+                                    }
+                                };
+                                if !matches {
+                                    all_match = false;
+                                    break;
                                 }
-                                if all_match {
-                                    new_row[c_idx] = normalized.clone();
-                                }
+                            }
+                            if all_match {
+                                new_row[c_idx] = normalized.clone();
                             }
                         }
                     }

@@ -14,7 +14,7 @@ pub struct Events {
 
 impl Events {
     pub fn new(tick_rate: Duration) -> Events {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(100);
         let _ = thread::spawn(move || {
             let mut last_tick = Instant::now();
             loop {
@@ -24,7 +24,9 @@ impl Events {
 
                 if event::poll(timeout).expect("should poll works") {
                     if let CrosstermEvent::Key(key) = event::read().expect("can read events") {
-                        tx.send(Event::Input(key)).expect("can send events");
+                        if tx.send(Event::Input(key)).is_err() {
+                            break;
+                        }
                     }
                 }
 

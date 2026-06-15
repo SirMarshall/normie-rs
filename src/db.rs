@@ -4,13 +4,20 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
+    rc::Rc,
 };
+
+pub struct ColumnData {
+    pub values: Vec<Rc<str>>,
+    pub numeric_values: Vec<Option<f64>>,
+}
 
 pub struct Database {
     pub headers: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub columns: Vec<ColumnData>,
     pub unique_values: Vec<Vec<(String, String)>>,
-    pub row_registry: Vec<HashMap<String, Vec<usize>>>,
+    pub row_registry: Vec<HashMap<Rc<str>, Vec<usize>>>,
+    pub num_rows: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
